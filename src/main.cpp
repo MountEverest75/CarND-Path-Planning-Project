@@ -207,7 +207,8 @@ int main() {
   int lane = 1;
 
   //Define Reference velocity as target
-  double ref_vel = 49.5; //mph. Always better to set it closer to speed limit but not exceed
+  // double ref_vel = 49.5; //mph. Always better to set it closer to speed limit but not exceed
+  double ref_vel = 0.0; //Start at zero to ensure it does not cold start directly to 49.5 mph speed
 
   h.onMessage([&ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
@@ -248,6 +249,49 @@ int main() {
 
             //TODO Spline Changes: Set Previous pass size
             int prev_size = previous_path_x.size();
+
+            //TODO: Car/Collision Detection and lane change
+            if (prev_size > 0) {
+              car_s = end_path_s;
+            }
+
+            bool too_close = false;
+            //Go through Sensor fusion list to find where cars are at, their speeds and define path plan behaviour
+            //Find ref_v to Use
+            for(int i=0;i < sensor_fusion.size();i++) {
+              //Find car is in which lane. The "d" value of each car helps us if its in our lane or other lanes.
+              float d = sensor_fusion[i][6];
+              //With each lane being 4 metres, we idenfify if its between 4 and 8 "6" being middle lane
+              if(d < (2+4*lane+2) && d > (2+4*lane-2)) {
+                //Check speed of the car if its in current lane
+                double vx = sensor_fusion[i][3];
+                double vy = sensor_fusion[i][4];
+                double check_speed = sqrt(vx*vx+vy*vy); //Magnitude
+                double check_car_s = sensor_fusion[i][5]; //S coordinate value identifies if its close or not
+
+                //Projecting into the Future
+                check_car_s+=((double)prev_size*0.02*check_speed); // if using previous points it can project s value output
+                //Check s values greater than our car and s gap
+                //Check if the car is too close or not
+                if((check_car_s > car_s) && (check_car_s-car_s)<30) {
+                    //Lower reference velocity to avoid crash or collision with cars in front
+                    //Set flag for lane change as well
+                    // ref_vel = 29.5; //mph
+                    too_close = true;
+                    if (lane > 0) {
+                      lane = 0;
+                    }
+                }
+              }
+            }
+
+            //Too close to car in front...slow down otherwise speed up at rate of 5m/s2
+            if (too_close) {
+              ref_vel -= 0.224; //Equivalent to 5m/s2
+            } else if(ref_vel < 49.5) {
+              ref_vel += 0.224;
+            }
+            //END: Car/Collision Detection and lane change
 
             //Create a list of widely spaced waypoints (x,y) evenly spaced at 30m
             vector<double> ptsx;
@@ -290,6 +334,7 @@ int main() {
 
             //Use Frenet add evenly 30m spaced points ahead of staring reference. The intervals defined are 30, 60 and 90
             // The 2+4*lane turns to six for middle lane. But this would be helpful if we change lanes
+            //Spline also extrapolates the lane changes
             vector<double> next_wp0 = getXY(car_s+30, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
             vector<double> next_wp1 = getXY(car_s+60, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
             vector<double> next_wp2 = getXY(car_s+90, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
