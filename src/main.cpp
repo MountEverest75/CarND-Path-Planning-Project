@@ -166,6 +166,20 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+//Helper method to check the car lane
+bool is_on_lane(double d, int lane){
+    return d < (2+4*lane+2) && d > (2+4*lane-2);
+}
+
+//Define Finite State Machine states
+enum State {
+    KEEP_LANE,
+    SLOW_DOWN,
+    CHANGE_LEFT,
+    CHANGE_RIGHT,
+    KEEP_SPEED
+};
+
 int main() {
   uWS::Hub h;
 
@@ -210,7 +224,26 @@ int main() {
   // double ref_vel = 49.5; //mph. Always better to set it closer to speed limit but not exceed
   double ref_vel = 0.0; //Start at zero to ensure it does not cold start directly to 49.5 mph speed
 
-  h.onMessage([&ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  //Define constants
+  //Speed Limit
+  static const double max_vel = 49.5;
+
+  //Time Delta
+  static const double time_delta = 0.02;
+
+  //Reaction distance
+  static const double detection_distance = 30;
+
+  //Rear reaction distance
+  static const double detection_distance_back = 10;
+
+  //Spline Steps
+  static const vector<int> spline_steps = {30,60,90};
+
+  //Default state is to stay in lane
+  State state = KEEP_LANE;
+
+  h.onMessage([&state, &ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -246,6 +279,7 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
+            json msgJson;
 
             //TODO Spline Changes: Set Previous pass size
             int prev_size = previous_path_x.size();
@@ -255,42 +289,92 @@ int main() {
               car_s = end_path_s;
             }
 
+            //Flags to identify cars closer for safer maneuvers
             bool too_close = false;
+            bool car_on_left_lane = false;
+            bool car_on_right_lane = false;
+            double car_in_front_speed = 0.0;
+
             //Go through Sensor fusion list to find where cars are at, their speeds and define path plan behaviour
-            //Find ref_v to Use
+            //Find ref_v to use
+            //The following loop calculates new desired behaviour based on location and sensor data
             for(int i=0;i < sensor_fusion.size();i++) {
               //Find car is in which lane. The "d" value of each car helps us if its in our lane or other lanes.
               float d = sensor_fusion[i][6];
-              //With each lane being 4 metres, we idenfify if its between 4 and 8 "6" being middle lane
-              if(d < (2+4*lane+2) && d > (2+4*lane-2)) {
-                //Check speed of the car if its in current lane
-                double vx = sensor_fusion[i][3];
-                double vy = sensor_fusion[i][4];
-                double check_speed = sqrt(vx*vx+vy*vy); //Magnitude
-                double check_car_s = sensor_fusion[i][5]; //S coordinate value identifies if its close or not
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double check_speed = sqrt(vx*vx+vy*vy); //Magnitude
+              double check_car_s = sensor_fusion[i][5]; //S coordinate value identifies if its close or not
 
-                //Projecting into the Future
-                check_car_s+=((double)prev_size*0.02*check_speed); // if using previous points it can project s value output
+              //Projecting into the Future (Next Frame)
+              check_car_s+=((double)prev_size*0.02*check_speed); // if using previous points it can project s value output
+              double s_distance = check_car_s - car_s;
+
+              //With each lane being 4 metres, we idenfify if its between 4 and 8 "6" being middle lane
+              //Check speed of the car if its in current lane
+              if(is_on_lane(d, lane)) { //Same lane
                 //Check s values greater than our car and s gap
                 //Check if the car is too close or not
-                if((check_car_s > car_s) && (check_car_s-car_s)<30) {
+                if((s_distance > 0) && (s_distance<detection_distance)) {
                     //Lower reference velocity to avoid crash or collision with cars in front
                     //Set flag for lane change as well
-                    // ref_vel = 29.5; //mph
+                    //Get the speed of car in front
                     too_close = true;
-                    if (lane > 0) {
-                      lane = 0;
-                    }
+                    car_in_front_speed = check_speed *2.24;
                 }
+              } else if (is_on_lane(d, lane-1)) { //Left lane
+                        if(s_distance > -detection_distance_back && s_distance < detection_distance) {
+                            car_on_left_lane = true;
+                        }
+              } else if (is_on_lane(d, lane+1)) { //Right lane
+                        if(s_distance > -detection_distance_back && s_distance < detection_distance) {
+                            car_on_right_lane = true;
+                        }
               }
             }
 
             //Too close to car in front...slow down otherwise speed up at rate of 5m/s2
+            // if (too_close) {
+            //   ref_vel -= 0.224; //Equivalent to 5m/s2
+            // } else if(ref_vel < 49.5) {
+            //   ref_vel += 0.224;
+            // }
+
+            //Lane decisions
             if (too_close) {
-              ref_vel -= 0.224; //Equivalent to 5m/s2
-            } else if(ref_vel < 49.5) {
-              ref_vel += 0.224;
+              if(lane > 0 && !car_on_left_lane) { //Not on Left Lane and there are no cars blocking
+                state = CHANGE_LEFT;
+              } else if (lane < 2 && !car_on_right_lane) { //Not on Right Lane and there are no cars
+                state = CHANGE_RIGHT;
+              } else if(ref_vel > car_in_front_speed) { //If the current speed is more than estimated speed of car in front
+                state = SLOW_DOWN;
+              } else {
+                state = KEEP_SPEED;
+              }
+            } else {
+              state = KEEP_LANE;
             }
+
+            //Set maneuvers - change lanes, slow down or maintain speed based on the desired state set in the previous step
+            switch(state){
+                case CHANGE_LEFT: lane--; break;
+                case CHANGE_RIGHT: lane++; break;
+                case KEEP_LANE:
+                    if(ref_vel < max_vel){
+                      //ref_vel += 7 / .224*time_delta;
+                      ref_vel += 0.224;
+                    }
+                    break;
+                case SLOW_DOWN:
+                  //ref_vel -= 4 / .224*time_delta;
+                    ref_vel -= 0.224;
+                    break;
+                case KEEP_SPEED:
+                    break;
+                default:
+                    break;
+            }
+
             //END: Car/Collision Detection and lane change
 
             //Create a list of widely spaced waypoints (x,y) evenly spaced at 30m
@@ -402,25 +486,6 @@ int main() {
               next_y_vals.push_back(y_point);
             }
 
-            json msgJson;
-
-          	// //BEGIN TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-            // //STEP 1: Move Car at 50mph in Straight line
-            // double dist_inc = 0.3; //Distance increment 0.5m. Close to 50mph speed
-            // //Iterate 50 points for path planner
-            // for(int i = 0; i < 50; i++)
-            // {
-            //       //Go constantly in a Straight line at constant velocity through distance increment
-            //       double next_s = car_s + (i+1)*dist_inc;
-            //        /*Waypoints are calculated from yellow line which is 1.5 lanes away from center lane,
-            //           and each lane is 4 metres long. That would mean to stay in the same lane we set next_d to 1.5*4 = 6
-            //       */
-            //       double next_d = 6;
-            //       vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-            //       next_x_vals.push_back(xy[0]);
-            //       next_y_vals.push_back(xy[1]);
-            // }
-            // //END
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
