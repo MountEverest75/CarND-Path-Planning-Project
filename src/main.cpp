@@ -173,11 +173,11 @@ bool is_on_lane(double d, int lane){
 
 //Define Finite State Machine states
 enum State {
-    KEEP_LANE,
+    STAY_IN_LANE,
     SLOW_DOWN,
-    CHANGE_LEFT,
-    CHANGE_RIGHT,
-    KEEP_SPEED
+    SWITCH_LEFT,
+    SWITCH_RIGHT,
+    MAINTAIN_SPEED
 };
 
 int main() {
@@ -241,7 +241,7 @@ int main() {
   static const vector<int> spline_steps = {30,60,90};
 
   //Default state is to stay in lane
-  State state = KEEP_LANE;
+  State state = STAY_IN_LANE;
 
   h.onMessage([&state, &ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
@@ -340,26 +340,26 @@ int main() {
             //   ref_vel += 0.224;
             // }
 
-            //Lane decisions
+            //Lane and maneuver decisions
             if (too_close) {
               if(lane > 0 && !car_on_left_lane) { //Not on Left Lane and there are no cars blocking
-                state = CHANGE_LEFT;
+                state = SWITCH_LEFT;
               } else if (lane < 2 && !car_on_right_lane) { //Not on Right Lane and there are no cars
-                state = CHANGE_RIGHT;
+                state = SWITCH_RIGHT;
               } else if(ref_vel > car_in_front_speed) { //If the current speed is more than estimated speed of car in front
                 state = SLOW_DOWN;
               } else {
-                state = KEEP_SPEED;
+                state = MAINTAIN_SPEED;
               }
             } else {
-              state = KEEP_LANE;
+              state = STAY_IN_LANE;
             }
 
             //Set maneuvers - change lanes, slow down or maintain speed based on the desired state set in the previous step
             switch(state){
-                case CHANGE_LEFT: lane--; break;
-                case CHANGE_RIGHT: lane++; break;
-                case KEEP_LANE:
+                case SWITCH_LEFT: lane--; break;
+                case SWITCH_RIGHT: lane++; break;
+                case STAY_IN_LANE:
                     if(ref_vel < max_vel){
                       //ref_vel += 7 / .224*time_delta;
                       ref_vel += 0.224;
@@ -369,7 +369,7 @@ int main() {
                   //ref_vel -= 4 / .224*time_delta;
                     ref_vel -= 0.224;
                     break;
-                case KEEP_SPEED:
+                case MAINTAIN_SPEED:
                     break;
                 default:
                     break;
@@ -416,20 +416,27 @@ int main() {
               ptsy.push_back(ref_y);
             }
 
+            //Generate Spline points in steps of 30, 60 and 90 meters
             //Use Frenet add evenly 30m spaced points ahead of staring reference. The intervals defined are 30, 60 and 90
             // The 2+4*lane turns to six for middle lane. But this would be helpful if we change lanes
             //Spline also extrapolates the lane changes
-            vector<double> next_wp0 = getXY(car_s+30, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-            vector<double> next_wp1 = getXY(car_s+60, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-            vector<double> next_wp2 = getXY(car_s+90, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            // vector<double> next_wp0 = getXY(car_s+30, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            // vector<double> next_wp1 = getXY(car_s+60, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            // vector<double> next_wp2 = getXY(car_s+90, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            //
+            // ptsx.push_back(next_wp0[0]);
+            // ptsx.push_back(next_wp1[0]);
+            // ptsx.push_back(next_wp2[0]);
+            //
+            // ptsy.push_back(next_wp0[1]);
+            // ptsy.push_back(next_wp1[1]);
+            // ptsy.push_back(next_wp2[1]);
+            for(int i = 0; i<spline_steps.size(); i++) {
+              vector<double> next_wp = getXY(car_s+spline_steps[i], (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              ptsx.push_back(next_wp[0]);
+              ptsy.push_back(next_wp[1]);
+            }
 
-            ptsx.push_back(next_wp0[0]);
-            ptsx.push_back(next_wp1[0]);
-            ptsx.push_back(next_wp2[0]);
-
-            ptsy.push_back(next_wp0[1]);
-            ptsy.push_back(next_wp1[1]);
-            ptsy.push_back(next_wp2[1]);
 
             for(int i = 0; i < ptsx.size(); i++)
             {
